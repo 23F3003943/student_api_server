@@ -22,6 +22,17 @@ engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False} i
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base.metadata.create_all(bind=engine)
 
+# Runtime migration: if using Postgres and columns missing, add them.
+if DATABASE_URL.startswith("postgres"):
+    try:
+        with engine.connect() as conn:
+            # Add evaluation_url if missing
+            conn.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS evaluation_url varchar;")
+            conn.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS brief text;")
+    except Exception:
+        # Ignore migration errors here; they can be applied manually if needed
+        pass
+
 # Celery setup
 celery_app = Celery("worker", broker=REDIS_URL)
 
@@ -60,7 +71,11 @@ def api_endpoint(request: TaskRequest, db: Session = Depends(get_db)):
         status="RECEIVED",
         email=request.email,
         task_name=request.task,
-        round=request.round
+        round=request.round,
+        # Persist optional fields for worker use
+        evaluation_url=str(request.evaluation_url) if getattr(request, 'evaluation_url', None) else None,
+        # brief may be optional
+        **({ 'brief': request.brief } if getattr(request, 'brief', None) else {})
     )
     db.add(new_task)
     try:

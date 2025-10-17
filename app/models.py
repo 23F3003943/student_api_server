@@ -19,4 +19,6 @@ class Task(Base):
 	repo_url = Column(String, nullable=True)
 	commit_sha = Column(String, nullable=True)
 	pages_url = Column(String, nullable=True)
+	evaluation_url = Column(String, nullable=True)
+	brief = Column(Text, nullable=True)
 	error_message = Column(Text, nullable=True)

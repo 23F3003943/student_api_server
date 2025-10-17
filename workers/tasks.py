@@ -44,21 +44,9 @@ def process_task(task_id: int):
 			task.status = "GENERATING_PROJECT"
 			db.commit()
 
-			# Create project files safely (use getattr for optional fields)
+			# Generate project files (LLM-powered when token present) into a temp dir
 			with tempfile.TemporaryDirectory() as tmpdir:
-				task_brief = getattr(task, 'brief', '') or ''
-				index_path = os.path.join(tmpdir, "index.html")
-				with open(index_path, "w", encoding="utf-8") as f:
-					f.write(f"<html><body><p>{task_brief}</p></body></html>")
-
-				readme_path = os.path.join(tmpdir, "README.md")
-				with open(readme_path, "w", encoding="utf-8") as f:
-					f.write(f"# Task Brief\n{task_brief}\n\nNonce: {task.nonce}")
-
-				license_path = os.path.join(tmpdir, "LICENSE")
-				mit_text = """MIT License\n\nCopyright (c) {year} {author}\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE.\n""".format(year="2025", author=task.email)
-				with open(license_path, "w", encoding="utf-8") as f:
-					f.write(mit_text)
+				generate_project_files(task, tmpdir)
 
 				# State: CREATE_REPO
 				task.status = "CREATE_REPO"
@@ -130,21 +118,21 @@ def post_with_retry(url, payload):
 def notify_evaluator(task: Task, db, start_time):
 	if not task.pages_url or not task.repo_url or not task.commit_sha:
 		raise Exception("Missing required fields for evaluation notification.")
-	# Get original evaluation_url from the DB if needed (assume stored in error_message for now)
-	# In a real implementation, this should be a column or related table
-	evaluation_url = getattr(task, 'evaluation_url', None)
-	if not evaluation_url and hasattr(task, 'error_message') and task.error_message:
-		# Hack: try to parse from error_message if stored there
-		evaluation_url = task.error_message
+	evaluation_url = task.evaluation_url
 	if not evaluation_url:
 		raise Exception("No evaluation_url found for task.")
 	payload = build_evaluation_payload(task)
 	elapsed = time.time() - start_time
 	remaining = max(0, 600 - elapsed)
 	try:
-		post_with_retry(evaluation_url, payload)
+		resp = post_with_retry(evaluation_url, payload)
+		# Persist http result for debugging
+		task.error_message = f"Notified evaluator: {resp.status_code}"
+		db.commit()
 	except Exception as e:
-		raise Exception(f"Failed to notify evaluator: {e}")
+		task.error_message = f"Failed to notify evaluator: {e}"
+		db.commit()
+		raise
 
 def enable_github_pages(task: Task, github_token: str):
 	"""
@@ -232,15 +220,40 @@ def push_to_github(task: Task, local_path: str, repo_url: str, github_token: str
 		return None
 
 def generate_project_files(task: Task, target_dir: str):
-	# index.html
+	# If an AI token is available, prompt the model to generate code and README
+	ai_token = os.getenv("OPENAI_API_KEY") or os.getenv("AI_PIPE_TOKEN")
+	brief = getattr(task, 'brief', '') or ''
+	if ai_token:
+		prompt = f"Create a small static website for the following brief:\n\n{brief}\n\nInclude an index.html and a README describing the project. Keep code minimal and valid HTML."
+		try:
+			# Simple compatible call for OpenAI-like APIs (this is a best-effort placeholder)
+			headers = {"Authorization": f"Bearer {ai_token}", "Content-Type": "application/json"}
+			data = {"model": "gpt-4o-mini", "prompt": prompt, "max_tokens": 800}
+			resp = requests.post("https://api.openai.com/v1/completions", headers=headers, json=data, timeout=15)
+			if resp.status_code == 200:
+				text = resp.json().get('choices', [])[0].get('text', '')
+				# Naive split: assume the model returns INDEX_HTML and README sections
+				parts = text.split('---')
+				index_html = parts[0].strip() if parts else f"<html><body><p>{brief}</p></body></html>"
+				readme_md = parts[1].strip() if len(parts) > 1 else f"# Task Brief\n{brief}"
+			else:
+				index_html = f"<html><body><p>{brief}</p></body></html>"
+				readme_md = f"# Task Brief\n{brief}"
+		except Exception:
+			index_html = f"<html><body><p>{brief}</p></body></html>"
+			readme_md = f"# Task Brief\n{brief}"
+	else:
+		index_html = f"<html><body><p>{brief}</p></body></html>"
+		readme_md = f"# Task Brief\n{brief}\n\nNonce: {task.nonce}"
+
+	# Write files
 	index_path = os.path.join(target_dir, "index.html")
 	with open(index_path, "w", encoding="utf-8") as f:
-		f.write(f"<html><body><p>{task.brief or ''}</p></body></html>")
+		f.write(index_html)
 
-	# README.md
 	readme_path = os.path.join(target_dir, "README.md")
 	with open(readme_path, "w", encoding="utf-8") as f:
-		f.write(f"# Task Brief\n{task.brief or ''}\n\nNonce: {task.nonce}")
+		f.write(readme_md)
 
 	# LICENSE (MIT License)
 	license_path = os.path.join(target_dir, "LICENSE")
