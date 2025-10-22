@@ -3,6 +3,11 @@ import httpx
 import os
 from dotenv import load_dotenv
 
+# app/notify.py
+import httpx
+import os
+from dotenv import load_dotenv
+
 load_dotenv()
 
 def notify_evaluation_server(evaluation_url: str, payload: dict) -> bool:
